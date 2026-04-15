@@ -69,18 +69,18 @@ function selectBestVoice(voices: SpeechSynthesisVoice[], config: TTSConfig): Spe
 /**
  * Limpa markdown e código para fala natural.
  * Remove: blocos de código, inline code, URLs, cabeçalhos, negrito/itálico,
- * linhas separadoras, marcadores de lista, nomes de arquivo isolados.
- * Mantém frases conversacionais mesmo com parênteses ou pontuação.
+ * linhas separadoras, marcadores de lista, tabelas, símbolos mudos (#|>),
+ * nomes de arquivo isolados, emojis técnicos isolados.
  */
 export function cleanForSpeech(rawText: string, maxChars = 1200): string {
   let text = rawText;
 
   // 1. Remove blocos de código (```...```)
-  text = text.replace(/```[\s\S]*?```/g, "");
+  text = text.replace(/```[\s\S]*?```/g, " ");
 
-  // 2. Remove inline code (`...`) — substitui por conteúdo sem backtick
+  // 2. Remove inline code (`...`) — mantém só o conteúdo
   text = text.replace(/`([^`\n]{1,60})`/g, "$1");
-  text = text.replace(/`[^`\n]+`/g, "");
+  text = text.replace(/`[^`\n]+`/g, " ");
 
   // 3. Remove cabeçalhos markdown (# Título → Título)
   text = text.replace(/^#{1,6}\s+/gm, "");
@@ -89,34 +89,52 @@ export function cleanForSpeech(rawText: string, maxChars = 1200): string {
   text = text.replace(/\*{2,3}([^*\n]+)\*{2,3}/g, "$1");
   text = text.replace(/\*([^*\n]+)\*/g, "$1");
   text = text.replace(/_{2}([^_\n]+)_{2}/g, "$1");
+  text = text.replace(/_([^_\n]+)_/g, "$1");
 
   // 5. Remove URLs
   text = text.replace(/https?:\/\/\S+/g, "");
 
-  // 6. Filtra linha a linha — remove ruído técnico óbvio
+  // 6. Remove linhas de tabela markdown (| col | col |)
+  text = text.replace(/^\|.+\|$/gm, "");
+  text = text.replace(/^\|?[-:| ]+\|$/gm, "");
+
+  // 7. Remove símbolos soltos que são verbalizados incorretamente
+  text = text.replace(/#/g, "");          // hashtag → Cerquilha
+  text = text.replace(/\|/g, "");          // pipe → barra vertical
+  text = text.replace(/>/g, "");           // maior que / blockquote
+  text = text.replace(/&/g, " e ");        // ampersand
+  text = text.replace(/@/g, "");           // arroba isolada
+  text = text.replace(/\\/g, "");          // barra invertida
+  text = text.replace(/\^/g, "");          // circunflexo
+  text = text.replace(/~/g, "");           // til
+  text = text.replace(/={3,}/g, "");       // separadores ===
+  text = text.replace(/-{3,}/g, "");       // separadores ---
+
+  // 8. Filtra linha a linha — remove ruído técnico óbvio
   const lines = text.split("\n").filter(line => {
     const t = line.trim();
     if (!t) return false;
-    // Linhas separadoras (---, ===, ___...)
+    // Linhas separadoras
     if (/^[-─—=*_]{3,}$/.test(t)) return false;
-    // Nomes de arquivo isolados (ex: EditorLayout.tsx, src/lib/utils.ts)
+    // Nomes de arquivo isolados
     if (/^[\w\-./\\]+\.(ts|tsx|js|jsx|py|json|css|html|md|sh|env|toml|yaml|yml|lock)$/.test(t)) return false;
-    // Linhas que são CLARAMENTE só código (começam com palavras-chave de código)
+    // Linhas que são CLARAMENTE só código
     if (/^(import\s|export\s|const\s|let\s|var\s|function\s|class\s|return\s|if\s*\(|for\s*\(|while\s*\(|async\s|await\s)/.test(t)) return false;
     // Linhas que são só símbolos
     if (/^[{}[\]();,.<>|&^%$@!=+\-*/\\]+$/.test(t)) return false;
     return true;
   });
 
-  // 7. Remove marcadores de lista no início
+  // 9. Remove marcadores de lista no início da linha
   text = lines.join(" ")
     .replace(/^\s*[-*•]\s+/gm, "")
     .replace(/^\s*\d+\.\s+/gm, "");
 
-  // 8. Limpa espaços múltiplos
+  // 10. Limpa espaços múltiplos e pontuação dobrada
   text = text.replace(/\s+/g, " ").trim();
+  text = text.replace(/([.!?])\s*([.!?])+/g, "$1"); // .. → .
 
-  // 9. Trunca em limite de caracteres na fronteira de frase
+  // 11. Trunca em limite de caracteres na fronteira de frase
   if (text.length <= maxChars) return text;
   const cut = text.lastIndexOf(".", maxChars);
   return cut > 50 ? text.slice(0, cut + 1) : text.slice(0, maxChars);

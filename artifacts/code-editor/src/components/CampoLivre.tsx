@@ -4,7 +4,7 @@ import {
   Loader2, StopCircle, Check, ClipboardCopy, Save, Key, X,
   Download, Upload, Mic, MicOff, Volume2, VolumeX, SlidersHorizontal,
 } from "lucide-react";
-import { speak, stopSpeaking, loadTTSConfig, saveTTSConfig, getAvailableVoices, type TTSConfig } from "@/lib/tts-service";
+import { speak, stopSpeaking, loadTTSConfig, saveTTSConfig, getAvailableVoices, cleanForSpeech, type TTSConfig } from "@/lib/tts-service";
 
 const AUTO_DETECT: [string, string, string, string][] = [
   ["gsk_",  "https://api.groq.com/openai/v1",                          "llama-3.3-70b-versatile", "Groq"],
@@ -107,11 +107,13 @@ export default function CampoLivre({ onBack }: CampoLivreProps) {
   const [voiceList,      setVoiceList]      = useState<SpeechSynthesisVoice[]>([]);
   const [ttsConfig,      setTtsConfig]      = useState<TTSConfig>(() => loadTTSConfig());
 
-  const abortRef  = useRef<AbortController | null>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
-  const importRef  = useRef<HTMLInputElement>(null);
+  const abortRef          = useRef<AbortController | null>(null);
+  const chatEndRef        = useRef<HTMLDivElement>(null);
+  const importRef         = useRef<HTMLInputElement>(null);
   const wantsListeningRef = useRef(false);
   const recognitionRef    = useRef<any>(null);
+  const conversationModeRef = useRef(false); // true quando usuário usa voz → reinicia mic após fala
+  const spokenPosRef      = useRef(0);       // posição até onde já foi falado (TTS progressivo)
 
   // Carrega vozes disponíveis no navegador
   useEffect(() => {
@@ -178,16 +180,70 @@ export default function CampoLivre({ onBack }: CampoLivreProps) {
   const loadKey = (sk: SavedKey) => { setApiKey(sk.key); setApiUrl(sk.url); setApiModel(sk.model); setShowSavedKeys(false); };
   const removeKey = (id: string) => setSavedKeys(prev => prev.filter(k => k.id !== id));
 
+  // Reinicia o microfone após o TTS terminar (modo conversa)
+  const restartMicAfterSpeech = useCallback(() => {
+    if (!conversationModeRef.current) return;
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    setTimeout(() => {
+      if (!conversationModeRef.current) return;
+      const rec = new SR();
+      rec.lang = "pt-BR";
+      rec.continuous = true;
+      rec.interimResults = true;
+      let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+      let fullText = "";
+      const scheduleAutoSend = () => {
+        if (silenceTimer) clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+          const txt = fullText.trim();
+          try { rec.stop(); } catch {}
+          conversationModeRef.current = false;
+          setIsListening(false);
+          if (txt) sendMessageRef.current?.(txt);
+        }, 1800);
+      };
+      rec.onresult = (e: any) => {
+        let final = ""; let interim = "";
+        for (let i = 0; i < e.results.length; i++) {
+          if (e.results[i].isFinal) final += e.results[i][0].transcript;
+          else interim += e.results[i][0].transcript;
+        }
+        fullText = final || interim;
+        setPrompt(fullText);
+        if (fullText) scheduleAutoSend();
+      };
+      rec.onerror = () => { setIsListening(false); conversationModeRef.current = false; };
+      rec.onend   = () => { setIsListening(false); };
+      recognitionRef.current = rec;
+      try { rec.start(); setIsListening(true); } catch { setIsListening(false); }
+    }, 400);
+  }, []);
+
+  const sendMessageRef = useRef<((text: string) => void) | null>(null);
+
   const sendMessage = useCallback(async (textOverride?: string) => {
     const userMsg = (textOverride ?? prompt).trim();
     if (!userMsg || isProcessing) return;
-    // Unlock TTS on Android (must be inside a user-gesture call chain)
+    // Unlock TTS no Android (deve estar dentro de um user-gesture)
     if (window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(" ");
       u.volume = 0; u.lang = "pt-BR";
       window.speechSynthesis.speak(u);
     }
     setPrompt("");
+    spokenPosRef.current = 0;
+
+    // Sistema de prompt de voz: pede respostas curtas e naturais (sem markdown)
+    const voiceSystemMsg = ttsOn ? {
+      role: "system" as const,
+      content: "Você está em modo de conversa por voz. Responda de forma natural e direta, SEM usar markdown, asteriscos, sustenidos, hashtags, tabelas, listas numeradas, código ou caracteres especiais. Fale como numa conversa normal. Para tarefas longas ou com várias etapas, anuncie brevemente o que fará em seguida, por exemplo: 'Já analisei o primeiro ponto, agora vou verificar o segundo.' Seja objetivo e amigável.",
+    } : null;
+    const fullHistory = [
+      ...(voiceSystemMsg ? [voiceSystemMsg] : []),
+      ...history,
+      { role: "user" as const, content: userMsg },
+    ];
     const newHistory: Message[] = [...history, { role: "user", content: userMsg }];
     setHistory(newHistory);
     setIsProcessing(true);
@@ -195,6 +251,12 @@ export default function CampoLivre({ onBack }: CampoLivreProps) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+
+    const afterSpeak = (text: string) => {
+      const clean = cleanForSpeech(text);
+      if (!clean.trim()) { restartMicAfterSpeech(); return; }
+      speak(clean, { ...ttsConfig, enabled: true }, restartMicAfterSpeech);
+    };
 
     try {
       const cleanKey = apiKey.trim();
@@ -211,7 +273,7 @@ export default function CampoLivre({ onBack }: CampoLivreProps) {
         const data = await resp.json();
         const content = data.content || "";
         setHistory(prev => [...prev, { role: "assistant", content }]);
-        if (ttsOn && content) speak(content, loadTTSConfig());
+        if (ttsOn && content) afterSpeak(content);
         return;
       }
 
@@ -223,7 +285,7 @@ export default function CampoLivre({ onBack }: CampoLivreProps) {
           apiKey: cleanKey,
           apiUrl: apiUrl.trim(),
           model: apiModel,
-          messages: newHistory,
+          messages: fullHistory,
           stream: true,
           maxTokens: 16384,
         }),
@@ -257,27 +319,60 @@ export default function CampoLivre({ onBack }: CampoLivreProps) {
             const p = JSON.parse(j);
             if (p.error) throw new Error(typeof p.error === "string" ? p.error : JSON.stringify(p.error));
             const delta = p.choices?.[0]?.delta?.content || p.text || p.content || "";
-            if (delta) { full += delta; setStreaming(full); }
+            if (delta) {
+              full += delta;
+              setStreaming(full);
+              // TTS progressivo: fala frases completas conforme chegam
+              if (ttsOn && conversationModeRef.current) {
+                const unsaid = full.slice(spokenPosRef.current);
+                // Detecta frase completa (termina com . ! ? e tem tamanho mínimo)
+                const sentMatch = unsaid.match(/^(.{30,}?[.!?])\s/s);
+                if (sentMatch) {
+                  const toSay = cleanForSpeech(sentMatch[1], 400);
+                  if (toSay.trim().length > 10) {
+                    spokenPosRef.current += sentMatch[0].length;
+                    // Só fala se TTS não estiver tocando (evita cortar frase anterior)
+                    if (!window.speechSynthesis?.speaking) {
+                      speak(toSay, { ...ttsConfig, enabled: true });
+                    }
+                  }
+                }
+              }
+            }
           } catch (e) { if (e instanceof SyntaxError) continue; throw e; }
         }
       }
 
       if (full.trim()) {
         setHistory(prev => [...prev, { role: "assistant", content: full }]);
-        if (ttsOn) speak(full, { ...ttsConfig, enabled: true });
+        if (ttsOn) {
+          // Fala o restante que ainda não foi falado
+          const remaining = full.slice(spokenPosRef.current);
+          afterSpeak(remaining || full);
+        }
       }
     } catch (err: any) {
       if (err.name === "AbortError") return;
       const msg = err.message || "Erro desconhecido";
       setHistory(prev => [...prev, { role: "assistant", content: `❌ ${msg}` }]);
+      conversationModeRef.current = false;
     } finally {
       setIsProcessing(false);
       setStreaming("");
       abortRef.current = null;
     }
-  }, [prompt, apiKey, apiUrl, apiModel, history, ttsOn, ttsConfig, isProcessing]);
+  }, [prompt, apiKey, apiUrl, apiModel, history, ttsOn, ttsConfig, isProcessing, restartMicAfterSpeech]);
 
-  const stop = () => { abortRef.current?.abort(); abortRef.current = null; };
+  // Ref para o sendMessage (usado no callback do mic sem criar dep circular)
+  useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
+
+  const stop = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    conversationModeRef.current = false;
+    stopSpeaking();
+    recognitionRef.current?.stop();
+  };
 
   const clearHistory = () => { stop(); setHistory([]); setStreaming(""); localStorage.removeItem("cl_chat_history"); };
 
@@ -299,11 +394,16 @@ export default function CampoLivre({ onBack }: CampoLivreProps) {
   const startVoice = useCallback(() => {
     if (isListening) {
       recognitionRef.current?.stop();
+      conversationModeRef.current = false;
+      stopSpeaking();
       setIsListening(false);
       return;
     }
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) { alert("Use Chrome ou Edge para ditar por voz."); return; }
+
+    // Ativa o modo conversa: após a IA falar, o mic reinicia automaticamente
+    conversationModeRef.current = true;
 
     const rec = new SR();
     rec.lang = "pt-BR";

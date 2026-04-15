@@ -5,9 +5,9 @@ import {
   Loader2, StopCircle, Trash2, FileText, FileAudio,
   ChevronDown, ChevronUp, MessageSquare, Send, Zap,
   BookOpen, Clock, Wand2, Plus, Pencil, AlignLeft, AlignJustify,
-  Play, Search, Library,
+  Play, Search, Library, SlidersHorizontal,
 } from "lucide-react";
-import { speak, stopSpeaking, loadTTSConfig } from "@/lib/tts-service";
+import { speak, stopSpeaking, loadTTSConfig, saveTTSConfig, getAvailableVoices, cleanForSpeech, type TTSConfig } from "@/lib/tts-service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Ementa {
@@ -148,8 +148,11 @@ export default function AssistenteJuridico({ onBack }: Props) {
   const [isLoading, setIsLoading] = useState(false);
   const [activeMode,setActiveMode]= useState<string | null>(null);
   const [demoMode,  setDemoMode]  = useState(false);
-  const [ttsOn,     setTtsOn]     = useState(() => loadTTSConfig().enabled);
-  const [isListening, setIsListening] = useState(false);
+  const [ttsOn,          setTtsOn]          = useState(() => loadTTSConfig().enabled);
+  const [ttsConfig,      setTtsConfig]      = useState<TTSConfig>(() => loadTTSConfig());
+  const [showVoicePanel, setShowVoicePanel] = useState(false);
+  const [voiceList,      setVoiceList]      = useState<SpeechSynthesisVoice[]>([]);
+  const [isListening,    setIsListening]    = useState(false);
   const [copied,    setCopied]    = useState(false);
   const [importing, setImporting] = useState(false);
 
@@ -209,6 +212,25 @@ export default function AssistenteJuridico({ onBack }: Props) {
   }, [result, streaming]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatHistory, chatLoading]);
   useEffect(() => () => { recognitionRef.current?.stop(); }, []);
+
+  // ─── Vozes TTS ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const loadVoices = () => {
+      const voices = window.speechSynthesis?.getVoices() ?? [];
+      if (voices.length > 0) setVoiceList(voices);
+    };
+    loadVoices();
+    window.speechSynthesis?.addEventListener("voiceschanged", loadVoices);
+    return () => window.speechSynthesis?.removeEventListener("voiceschanged", loadVoices);
+  }, []);
+
+  const applyTTSConfig = (patch: Partial<TTSConfig>) => {
+    setTtsConfig(prev => {
+      const next = { ...prev, ...patch };
+      saveTTSConfig(next);
+      return next;
+    });
+  };
 
   // ─── Helpers de chave ─────────────────────────────────────────────────────
   const providerName = detectProviderName(apiKey);
@@ -325,7 +347,7 @@ export default function AssistenteJuridico({ onBack }: Props) {
         (full) => {
           if (full.trim()) {
             setResult(full);
-            if (ttsOn) speak(full.substring(0, 500), loadTTSConfig());
+            if (ttsOn) { const clean = cleanForSpeech(full); speak(clean, { ...ttsConfig, enabled: true }); }
             // Salvar no histórico
             const label = customPrompt
               ? (customActions.find(a => a.id === actionId)?.label || "Ação Custom")
@@ -548,11 +570,21 @@ export default function AssistenteJuridico({ onBack }: Props) {
         </span>
 
         <button
-          onClick={() => { setTtsOn(v => { const n = !v; if (!n) stopSpeaking(); return n; }); }}
+          onClick={() => { setTtsOn(v => { const n = !v; if (!n) { stopSpeaking(); setShowVoicePanel(false); } return n; }); }}
           className={`p-1.5 rounded-lg ${ttsOn ? "text-amber-400 bg-amber-900/20" : "text-gray-600 hover:bg-white/5"}`}
+          title={ttsOn ? "Desativar voz" : "Ativar voz"}
         >
           {ttsOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
         </button>
+        {ttsOn && (
+          <button
+            onClick={() => setShowVoicePanel(v => !v)}
+            className={`p-1.5 rounded-lg ${showVoicePanel ? "text-amber-300 bg-amber-900/30" : "text-gray-600 hover:bg-white/5 hover:text-amber-400"}`}
+            title="Configurar voz (velocidade, tom, escolher)"
+          >
+            <SlidersHorizontal size={13} />
+          </button>
+        )}
         <button
           onClick={() => { setShowConfig(v => !v); setShowSavedKeys(false); }}
           className={`p-1.5 rounded-lg ${showConfig ? "bg-white/10 text-gray-200" : "hover:bg-white/5 text-gray-500"}`}
@@ -567,6 +599,70 @@ export default function AssistenteJuridico({ onBack }: Props) {
           {savedKeys.length > 0 && <span className="absolute -top-0.5 -right-0.5 text-[9px] bg-amber-600 text-white w-3.5 h-3.5 rounded-full flex items-center justify-center font-bold">{savedKeys.length}</span>}
         </button>
       </header>
+
+      {/* ══ PAINEL DE VOZ ══ */}
+      {showVoicePanel && (
+        <div className="border-b border-amber-800/30 bg-[#1a2410] p-3 space-y-3 shrink-0">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Configurações de Voz</span>
+            <button onClick={() => setShowVoicePanel(false)} className="p-0.5 rounded text-gray-600 hover:text-gray-400"><X size={12} /></button>
+          </div>
+          <div>
+            <label className="text-[10px] text-gray-500 mb-1 block">Voz ({voiceList.length} disponíveis)</label>
+            {voiceList.length === 0 ? (
+              <p className="text-[11px] text-gray-600 italic">Sem vozes disponíveis neste navegador.</p>
+            ) : (
+              <div className="max-h-32 overflow-y-auto space-y-0.5 rounded-lg border border-gray-700/40 bg-[#141c0d] p-1">
+                <button onClick={() => applyTTSConfig({ voiceName: "" })}
+                  className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${ttsConfig.voiceName === "" ? "bg-amber-900/40 text-amber-300 border border-amber-700/40" : "text-gray-400 hover:bg-white/5"}`}>
+                  <span className="font-medium">Automático</span>
+                  <span className="text-[10px] text-gray-600 ml-1">(melhor voz pt-BR)</span>
+                </button>
+                {[...voiceList.filter(v => v.lang.toLowerCase().startsWith("pt")), ...voiceList.filter(v => !v.lang.toLowerCase().startsWith("pt"))].map(voice => (
+                  <button key={voice.name} onClick={() => applyTTSConfig({ voiceName: voice.name })}
+                    className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${ttsConfig.voiceName === voice.name ? "bg-amber-900/40 text-amber-300 border border-amber-700/40" : "text-gray-400 hover:bg-white/5"}`}>
+                    <span className="font-medium truncate block">{voice.name}</span>
+                    <span className="text-[10px] text-gray-600">{voice.lang} {voice.localService ? "· local" : "· online"}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] text-gray-500">Velocidade</label>
+              <span className="text-[10px] text-amber-400 font-mono">{ttsConfig.rate.toFixed(2)}×</span>
+            </div>
+            <input type="range" min="0.5" max="2.0" step="0.05" value={ttsConfig.rate}
+              onChange={e => applyTTSConfig({ rate: parseFloat(e.target.value) })}
+              className="w-full accent-amber-500 h-1.5" />
+            <div className="flex justify-between text-[9px] text-gray-700 mt-0.5"><span>Lenta</span><span>Normal</span><span>Rápida</span></div>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] text-gray-500">Tom de voz</label>
+              <span className="text-[10px] text-amber-400 font-mono">{ttsConfig.pitch.toFixed(2)}</span>
+            </div>
+            <input type="range" min="0.5" max="1.8" step="0.05" value={ttsConfig.pitch}
+              onChange={e => applyTTSConfig({ pitch: parseFloat(e.target.value) })}
+              className="w-full accent-amber-500 h-1.5" />
+            <div className="flex justify-between text-[9px] text-gray-700 mt-0.5"><span>Grave</span><span>Natural</span><span>Agudo</span></div>
+          </div>
+          <button
+            onClick={() => {
+              stopSpeaking();
+              const u = new SpeechSynthesisUtterance("Olá! Sou a Jasmim, sua assistente jurídica. Como posso ajudar?");
+              u.lang = ttsConfig.lang; u.rate = ttsConfig.rate; u.pitch = ttsConfig.pitch;
+              const selectedVoice = voiceList.find(v => v.name === ttsConfig.voiceName);
+              if (selectedVoice) u.voice = selectedVoice;
+              window.speechSynthesis?.speak(u);
+            }}
+            className="w-full py-1.5 text-[11px] bg-amber-900/30 border border-amber-700/40 text-amber-400 rounded-lg hover:bg-amber-900/50 transition-colors"
+          >
+            ▶ Testar voz agora
+          </button>
+        </div>
+      )}
 
       {/* ══ PAINEL CONFIGURAÇÃO ══ */}
       {showConfig && (
